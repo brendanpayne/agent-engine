@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "A standalone agentic LLM framework: provider-agnostic routing, tiered memory, structured-output validation, and a durable job queue.",
   "main": "index.js",
+  "bin": {
+    "agent-chat": "cli/chat.js"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18"
@@ -11,7 +14,8 @@
     "test": "jest",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "example": "node examples/cli-agent.js"
+    "example": "node examples/cli-agent.js",
+    "chat": "node cli/chat.js"
   },
   "keywords": [
     "llm",

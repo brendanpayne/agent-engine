@@ -209,6 +209,87 @@ the engine has no idea what a terminal is.
 
 ---
 
+## The chat CLI
+
+A real chatbot on top of the engine — saved transcripts, multiple sessions, and
+configuration you can change mid-conversation:
+
+```bash
+npm run chat
+```
+
+```
+agent-engine chat — /help for commands, /exit to quit.
+session s_mrwk0a03l52  deploy questions (14 messages)
+
+deploy questions > what did we decide about the migration?
+```
+
+Anything not starting with `/` goes to the model. Everything terminal-specific
+lives in [`cli/`](cli/) — the engine still just receives
+`{ userId, conversationId, text }`.
+
+### Sessions and history
+
+Transcripts are stored verbatim in `db/cli_chat.sqlite`. That is deliberately
+*not* the engine's memory: facts, summaries, and the archive are derived and
+pruned on a retention policy, so neither one is a transcript you can scroll.
+
+A session id doubles as the engine's `conversationId`, so `/switch` moves the
+memory scope along with the transcript.
+
+| Command | Effect |
+|---|---|
+| `/new [title]` | Start a session — new transcript *and* new memory scope |
+| `/sessions` | List sessions, most recent first |
+| `/switch <id>` | Switch by id, unique id prefix, or exact title |
+| `/rename <title>` | Retitle (untitled sessions auto-title from the first message) |
+| `/delete <id>` | Delete a session and its transcript |
+| `/history [n]` | Print the last n turns |
+| `/export [file]` | Write the transcript to Markdown, or `.json` for raw records |
+| `/clear` | Erase the transcript — engine memory untouched |
+| `/forget` | Drop the engine's facts and summaries for this conversation |
+
+`/clear` and `/forget` are separate on purpose: erasing what you can read and
+erasing what the model recalls are different intentions, and merging them makes
+one of the two happen by accident.
+
+### Configuration
+
+`/config` lists every setting; `/set <key> <value>` changes one and persists it
+to `db/cli-settings.json`. `default` as a value restores the default.
+
+```
+> /set stream off
+> /set toolDepth 2
+> /persona You are a terse release engineer.
+```
+
+| Setting | Default | Effect |
+|---|---|---|
+| `model` | engine default | Chat model id **(restart)** |
+| `lowBudget` | `off` | Halve the tool budget, skip critique **(restart)** |
+| `stream` | `on` | Stream tokens as they arrive |
+| `tools` | `on` | Expose the built-in tools to the model |
+| `memory` | `on` | Write facts and summaries after each turn |
+| `toolDepth` | engine default | Max tool iterations per turn |
+| `persona` | engine default | System persona override |
+| `historyDepth` | `20` | Past messages replayed into each turn |
+| `userId` / `userName` / `scopeId` | `cli-user` / `You` / `cli` | Identity sent with each turn |
+| `showUsage` / `showTools` | `on` | Per-reply token/cost and tool lines |
+
+Settings marked **(restart)** map to engine configuration that the agent loop
+reads once at module load; the CLI applies them to the environment at startup
+and says so when you set one, rather than pretending a live change took.
+
+### Inspection
+
+`/tools` lists what the model can call this turn, `/memory` shows the facts,
+summaries, and topic the engine currently holds for this conversation and user,
+and `/stats` reports messages, tokens, and spend for the session.
+
+---
+
 ## Usage
 
 ### The adapter boundary
