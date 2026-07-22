@@ -1,0 +1,22 @@
+node_modules/
+.env
+.env.local
+
+# SQLite stores and their WAL sidecars
+db/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+logs/
+coverage/
+
+# Scratch databases created by the test suite
+test/tmp/
+test/tmp-integration/
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
