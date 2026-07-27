@@ -148,10 +148,10 @@ define({
 
 define({
   name: "forget", usage: "/forget",
-  description: "Drop the engine's facts and summaries for this conversation.",
+  description: "Drop the engine's facts, summaries, and standing rules for this conversation.",
   handler: (ctx) => {
     ctx.engine.memory.store.deleteConversation(ctx.session.id);
-    ctx.out("Conversation memory (facts, summaries, participants) deleted.");
+    ctx.out("Conversation memory (facts, summaries, participants, standing instructions) deleted.");
   },
 });
 
@@ -282,6 +282,9 @@ define({
       `  [${f.confidence || "?"}${f.reinforcedCount ? `, x${f.reinforcedCount}` : ""}]`;
     const summary = s => (typeof s === "string" ? s : s.text || JSON.stringify(s));
 
+    const directive = d => `(${d.id}) ${d.text}  [${d.source || "manual"}]`;
+
+    render("standing instructions", convo.directives || [], directive);
     render("conversation facts", convo.facts || [], fact);
     render("conversation summaries", convo.summaries || [], summary);
     render("user facts", user.facts || [], fact);

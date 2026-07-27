@@ -303,3 +303,110 @@ describe("memory writes during a turn", () => {
     expect(mockChatCalls[0].messages[0].content).not.toContain("classified detail");
   });
 });
+
+describe("standing directives", () => {
+  it("carries stored directives into the prompt, above the volatile tail", async () => {
+    const { mergeDirectives } = require("../../src/memory/directives");
+    const { directives } = mergeDirectives([], ["Never reveal puzzle answers; give hints instead"]);
+    await memoryStore.updateConversation("conv-directives", { directives });
+
+    mockResponses = [{ content: "ok", finish_reason: "stop" }];
+    await engine.run(baseInput({ conversationId: "conv-directives" }), { updateMemory: false });
+
+    const systemPrompt = mockChatCalls[0].messages[0].content;
+    expect(systemPrompt).toContain("[Standing Instructions]");
+    expect(systemPrompt).toContain("Never reveal puzzle answers");
+    expect(systemPrompt.indexOf("[Standing Instructions]"))
+      .toBeLessThan(systemPrompt.indexOf("Current time:"));
+  });
+
+  it("persists a directive the model sets through the tool", async () => {
+    mockResponses = [
+      {
+        content: null,
+        finish_reason: "tool_calls",
+        tool_calls: [toolCall("set_directive", { instruction: "Keep replies under three sentences" })],
+      },
+      { content: "Got it — short replies from now on.", finish_reason: "stop" },
+    ];
+
+    const result = await engine.run(
+      baseInput({ conversationId: "conv-set-directive", text: "from now on keep replies under three sentences" }),
+      { updateMemory: false },
+    );
+
+    expect(result.toolCalls.map(t => t.tool)).toEqual(["set_directive"]);
+    const stored = memoryStore.getConversation("conv-set-directive").directives;
+    expect(stored).toHaveLength(1);
+    expect(stored[0].text).toBe("Keep replies under three sentences");
+    expect(stored[0].source).toBe("tool");
+    expect(stored[0].createdBy).toBe("alice");
+  });
+
+  it("retracts a directive through the tool, matching on wording", async () => {
+    const { mergeDirectives } = require("../../src/memory/directives");
+    const { directives } = mergeDirectives([], ["Never discuss spoilers for the finale"]);
+    await memoryStore.updateConversation("conv-remove-directive", { directives });
+
+    mockResponses = [
+      {
+        content: null,
+        finish_reason: "tool_calls",
+        tool_calls: [toolCall("remove_directive", { directive: "spoilers" })],
+      },
+      { content: "Understood, spoilers are back on the table.", finish_reason: "stop" },
+    ];
+
+    await engine.run(baseInput({ conversationId: "conv-remove-directive" }), { updateMemory: false });
+
+    expect(memoryStore.getConversation("conv-remove-directive").directives).toHaveLength(0);
+  });
+});
+
+describe("knowledge-base pre-flight", () => {
+  const kbStore = require("../../src/kb/store");
+
+  beforeAll(async () => {
+    await kbStore.create({
+      scopeId: "demo",
+      slug: "oncall-rotation",
+      title: "Oncall Rotation",
+      content: "The oncall rotation hands over every Tuesday at 10:00 UTC.",
+      tags: "operations",
+      creatorId: "admin",
+    });
+  });
+
+  it("injects a matching entry without the model spending a lookup_kb call", async () => {
+    mockResponses = [{ content: "Tuesdays at 10:00 UTC.", finish_reason: "stop" }];
+
+    const result = await engine.run(
+      baseInput({ text: "when does the oncall rotation hand over?" }),
+      { updateMemory: false },
+    );
+
+    const systemPrompt = mockChatCalls[0].messages[0].content;
+    expect(systemPrompt).toContain("[KnowledgeBase]");
+    expect(systemPrompt).toContain("[[kb:oncall-rotation]]");
+    expect(result.toolCalls).toHaveLength(0);
+  });
+
+  it("makes a pre-flight entry citable even though no tool returned it", async () => {
+    mockResponses = [{ content: "Tuesdays [[cite:kb:oncall-rotation]].", finish_reason: "stop" }];
+
+    const result = await engine.run(
+      baseInput({ text: "when does the oncall rotation hand over?" }),
+      { updateMemory: false, citationFormatters: { kb: ({ slug }) => `(kb:${slug})` } },
+    );
+
+    expect(result.text).toBe("Tuesdays (kb:oncall-rotation).");
+  });
+
+  it("stays out of the prompt when nothing matches", async () => {
+    mockResponses = [{ content: "ok", finish_reason: "stop" }];
+    await engine.run(baseInput({ text: "what should I have for lunch" }), { updateMemory: false });
+    // Not "[KnowledgeBase]" — the tool block names the section unconditionally.
+    // The injected entries themselves are what must be absent.
+    expect(mockChatCalls[0].messages[0].content).not.toContain("[[kb:");
+  });
+});

@@ -55,8 +55,9 @@ silence.
               │ summaries   │  │ builtins  │  │  ├ chat    │
               │ episodes    │  │ your own  │  │  ├ vision  │
               │ archive     │  └───────────┘  │  ├ image   │
-              └──────┬──────┘                 │  └ embed   │
-                     │                        └────────────┘
+              │ directives  │                 │  └ embed   │
+              └──────┬──────┘                 └────────────┘
+                     │
               ┌──────▼──────┐  ┌───────────┐  ┌────────────┐
               │   SQLite    │  │   jobs    │  │  schemas   │
               │  (WAL)      │  │  queue    │  │   (ajv)    │
@@ -106,6 +107,7 @@ hierarchy is that **per-turn prompt size stays flat as history grows**:
 | **Summaries** | Rolling conversation recaps | Always in prompt | `MAX_SUMMARIES` |
 | **Episodes** | Specific past events | On demand (`recall_episode`) | 100 per scope |
 | **Archive** | Verbatim messages | On demand (`search_history`) | TTL + per-conversation cap |
+| **Directives** | Standing behavioral rules | Always in prompt | `MAX_DIRECTIVES` |
 
 Facts carry metadata that makes the store *converge* rather than drift:
 
@@ -127,6 +129,35 @@ Facts carry metadata that makes the store *converge* rather than drift:
 Older tiers compact into newer ones: when the archive exceeds a threshold, the
 oldest chunks become one episode and the corresponding summary is pruned, so no
 two tiers describe the same period twice.
+
+**Fact selection is relevance-aware.** Recency and reinforcement decide which
+facts are *worth* keeping; they are the wrong criteria for deciding which ones
+belong in *this* prompt. Each turn's content words are scored against every
+fact — a hit on the key (`cat` against `pet_cat_name`) counts for more than a
+hit on the value — and `FACT_RELEVANCE_WEIGHT` blends that into the ranking. A
+three-month-old fact that answers the question being asked right now outranks
+fresh chatter about something else. Set the weight to `0` for the old behavior.
+
+**Standing directives are not facts.** A rule the user expects to hold forever
+("never spoil the answer, give hints instead") cannot live in the fact store:
+facts expire on a TTL, compete for prompt slots by score, and get merged by the
+compactor — three separate ways for a binding rule to silently vanish.
+Directives get their own store with no TTL, no compression, no score
+competition, and a dedicated high slot in the prompt. They arrive either
+through the `set_directive` / `remove_directive` tools or through a
+keyword-gated classifier that catches a rule stated in passing, since users
+state rules conversationally and rarely think to ask the agent to remember one.
+Retraction matches on id, exact text, containment, or paraphrase, so a rule can
+be dropped by naming a fragment of it.
+
+**Curated knowledge arrives before the model asks for it.** `lookup_kb` only
+fires when the model chooses to call it, which it rarely does on an ambient
+turn — so curated entries surfaced only when someone asked outright. A lexical
+pre-flight pass scores each inbound turn against the knowledge base locally
+(inverse document frequency over titles, tags, and bodies; **no embedding call
+per turn**) and injects the best matches as a `[KnowledgeBase]` block. Those
+entries are seeded into the citation store, so the model can cite them even
+though no tool returned them.
 
 **Identity is anchored on IDs, not names.** A per-conversation participant
 registry tracks display-name changes and stamps `previous_name` facts, so a
@@ -390,6 +421,8 @@ without one pass through unvalidated.
 | `recall_episode` | Retrieve specific past events | `CF_*` |
 | `generate_image` | Text-to-image, attached to the reply | `CF_*` |
 | `set_reminder` | Schedule a reminder via the job queue | — |
+| `set_directive` | Record a standing behavioral rule for the conversation | — |
+| `remove_directive` | Retract a standing rule by id, text, or paraphrase | — |
 
 `propose_kb_entry` deliberately cannot write. An agent that silently edits its
 own source of truth will eventually launder a hallucination into it, so
@@ -431,6 +464,11 @@ All configuration is environment-driven with sane defaults; see
 | `FACTS_INTERVAL` | `15` | Messages between fact-extraction passes |
 | `MAX_FACTS` | `25` | Per-store cap before compaction |
 | `FACT_TTL_DAYS` | `90` | Unreinforced facts expire |
+| `FACT_RELEVANCE_WEIGHT` | `0.5` | Weight of turn relevance in fact selection |
+| `DIRECTIVES_ENABLED` | `true` | Standing behavioral rules per conversation |
+| `MAX_DIRECTIVES` | `10` | Directives kept before oldest-first eviction |
+| `KB_PREFLIGHT_ENABLED` | `true` | Inject matching KB entries without a tool call |
+| `KB_PREFLIGHT_MIN_SCORE` | `0.25` | Lexical match floor for injection |
 | `LOW_BUDGET_MODE` | `false` | Halves tool budget, caps facts, skips critique |
 | `STREAMING_ENABLED` | `true` | Stream the first response of a turn |
 

@@ -35,11 +35,13 @@ const { splitAtWordBoundary } = require("./src/util/textSplit");
 const { isSafeUrl } = require("./src/util/ssrf");
 const { extractFirstUrl, fetchPageText } = require("./src/util/urlContext");
 const { withLock, withUserLock } = require("./src/util/lock");
+const text = require("./src/util/text");
 
 // Close every open database. Call on shutdown so WAL files checkpoint cleanly.
 function close() {
   jobs.stop();
   memory.store.close();
+  kb.preflight.invalidate();
   kb.close();
   kb.proposals.close();
   archive.close();
@@ -68,6 +70,7 @@ module.exports = {
   config,
   logger,
   ratelimiter,
+  text,
   splitAtWordBoundary,
   isSafeUrl,
   extractFirstUrl,

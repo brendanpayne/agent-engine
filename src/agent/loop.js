@@ -20,6 +20,9 @@ const {
   INCLUDE_CHANNEL_FACTS_IN_PROMPT,
   INCLUDE_USER_FACTS_IN_PROMPT,
   IMMEDIATE_FACTS_ENABLED,
+  DIRECTIVES_ENABLED,
+  KB_PREFLIGHT_ENABLED,
+  KB_PREFLIGHT_MAX_ENTRIES,
 } = require("../../config.js");
 const logger = require("../util/logger");
 const llm = require("../llm");
@@ -28,6 +31,8 @@ const memoryStore = require("../memory/store");
 const facts = require("../memory/facts");
 const summaries = require("../memory/summaries");
 const participantsModule = require("../memory/participants");
+const directives = require("../memory/directives");
+const kbPreflight = require("../kb/preflight");
 const { ToolRegistry, executeToolCall } = require("./tools/registry");
 const { BUILTIN_TOOLS } = require("./tools/builtin");
 const prompts = require("./prompts");
@@ -156,8 +161,13 @@ async function assembleContext(input, options, registry) {
   let userSummaryBlock = "";
   let userFactsBlock = "";
 
+  // What this turn is actually about, used to bias fact selection and to match
+  // knowledge-base entries. Perception is truncated: a fetched page body would
+  // otherwise make nearly every stored fact score a relevance hit.
+  const cueTokens = facts.buildCueTokens(input.text, facts.cueSlice(input.perception));
+
   if (INCLUDE_CHANNEL_FACTS_IN_PROMPT && context.facts?.length) {
-    conversationFactsBlock = facts.buildFactsBlock("ConversationFacts", context.facts);
+    conversationFactsBlock = facts.buildFactsBlock("ConversationFacts", context.facts, null, cueTokens);
   }
   if (context.summaries?.length) {
     conversationSummaryBlock = summaries.buildSummaryBlock(
@@ -177,21 +187,42 @@ async function assembleContext(input, options, registry) {
     const perUserFacts = await loadParticipantFacts(participantIds, conversationId);
     const nameOf = uid => participantsMap[uid]?.currentName
       || (uid === input.userId ? input.userName : null);
-    userFactsBlock = facts.buildMultiUserFactsBlock(input.userId, participantIds, perUserFacts, nameOf);
+    userFactsBlock = facts.buildMultiUserFactsBlock(input.userId, participantIds, perUserFacts, nameOf, cueTokens);
   }
 
   const presentNames = participantIds
     .map(uid => participantsMap[uid]?.currentName)
     .filter(Boolean);
 
+  const directivesBlock = DIRECTIVES_ENABLED
+    ? directives.buildDirectivesBlock(context.directives)
+    : "";
+
+  // Pre-flight KB hits reach the model without a lookup_kb call, so their slugs
+  // are handed back to the caller to seed the citation store — otherwise
+  // applyCitations would strip the [[cite:kb:...]] tokens the block invites.
+  let kbContextBlock = "";
+  const preflightKbSlugs = [];
+  if (KB_PREFLIGHT_ENABLED && input.scopeId) {
+    const cueText = [input.text, facts.cueSlice(input.perception)].filter(Boolean).join("\n");
+    const matches = kbPreflight.findRelevant(input.scopeId, cueText, KB_PREFLIGHT_MAX_ENTRIES);
+    if (matches.length > 0) {
+      kbContextBlock = kbPreflight.buildKbContextBlock(matches);
+      for (const m of matches) preflightKbSlugs.push(m.slug);
+      logger.debug(`[KBPreflight] Injected ${matches.length} entr(ies): ${matches.map(m => `${m.slug}(${m.score.toFixed(2)})`).join(", ")}`);
+    }
+  }
+
   const systemPrompt = prompts.assembleSystemPrompt({
     personaBlock: options.persona || context.persona?.systemPrompt || prompts.DEFAULT_PERSONA,
     topicBlock: prompts.buildTopicBlock(context.topic),
     identityRulesBlock: prompts.IDENTITY_RULES_BLOCK,
+    directivesBlock,
     conversationFactsBlock,
     conversationSummaryBlock,
     userSummaryBlock,
     userFactsBlock,
+    kbContextBlock,
     toolBlock: prompts.buildToolBlock(registry),
     perceptionBlock: prompts.buildPerceptionBlock(input.perception),
     participantsBlock: participantsModule.buildParticipantsBlock(participantsMap, participantIds),
@@ -217,7 +248,45 @@ async function assembleContext(input, options, registry) {
   let userPrompt = `[user_${input.userId}] ${input.userName || "user"}: ${input.text}`;
   if (input.perception) userPrompt += `\n\n[Perception]\n${input.perception}`;
 
-  return { systemPrompt, conversationHistory, userPrompt, context, participantsMap, participantIds };
+  return {
+    systemPrompt, conversationHistory, userPrompt, context,
+    participantsMap, participantIds, preflightKbSlugs,
+  };
+}
+
+// Trimming history by message count or token budget can cut between an
+// assistant message carrying tool_calls and the role:"tool" replies that answer
+// it. Either half alone is a 400 from the provider, so repair the pairing after
+// any trim: drop tool replies whose call was cut, then drop tool_calls whose
+// replies were cut.
+function pruneDanglingToolMessages(history) {
+  // Iterated to a fixpoint: dropping a partially-answered assistant message
+  // orphans the replies that DID survive, which then have to go too.
+  let current = history;
+  for (;;) {
+    const knownCallIds = new Set();
+    for (const m of current) {
+      if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+        for (const c of m.tool_calls) knownCallIds.add(c.id);
+      }
+    }
+
+    const answered = new Set();
+    const withoutOrphanReplies = current.filter(m => {
+      if (m.role !== "tool") return true;
+      if (!knownCallIds.has(m.tool_call_id)) return false;
+      answered.add(m.tool_call_id);
+      return true;
+    });
+
+    const next = withoutOrphanReplies.filter(m => {
+      if (m.role !== "assistant" || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) return true;
+      return m.tool_calls.every(c => answered.has(c.id));
+    });
+
+    if (next.length === current.length) return next;
+    current = next;
+  }
 }
 
 // Drop oldest history until the estimated prompt fits the budget. The system
@@ -225,7 +294,7 @@ async function assembleContext(input, options, registry) {
 // the context is self-defeating. A floor of 4 messages keeps the immediate
 // back-and-forth intact.
 function trimToTokenBudget(systemPrompt, conversationHistory, userPrompt) {
-  if (!CHAT_MAX_PROMPT_TOKENS) return conversationHistory;
+  if (!CHAT_MAX_PROMPT_TOKENS) return pruneDanglingToolMessages(conversationHistory);
 
   const render = history => [
     { role: "system", content: systemPrompt },
@@ -234,7 +303,7 @@ function trimToTokenBudget(systemPrompt, conversationHistory, userPrompt) {
   ].map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
 
   let estimate = estimateTokenCount(render(conversationHistory));
-  if (estimate <= CHAT_MAX_PROMPT_TOKENS) return conversationHistory;
+  if (estimate <= CHAT_MAX_PROMPT_TOKENS) return pruneDanglingToolMessages(conversationHistory);
 
   logger.warn(`[PromptTrim] Prompt estimated at ${estimate} tokens, trimming to ${CHAT_MAX_PROMPT_TOKENS}.`);
   const MIN_HISTORY_MESSAGES = 4;
@@ -245,7 +314,11 @@ function trimToTokenBudget(systemPrompt, conversationHistory, userPrompt) {
     if (estimate <= CHAT_MAX_PROMPT_TOKENS) break;
   }
   logger.debug(`[PromptTrim] ${conversationHistory.length} -> ${trimmed.length} messages, ~${estimate} tokens.`);
-  return trimmed;
+  const repaired = pruneDanglingToolMessages(trimmed);
+  if (repaired.length !== trimmed.length) {
+    logger.debug(`[PromptTrim] Dropped ${trimmed.length - repaired.length} dangling tool message(s) after trim.`);
+  }
+  return repaired;
 }
 
 // Stream a first attempt. Returns { streamed, text, toolCalls }. If the model
@@ -364,7 +437,7 @@ async function run(input, options = {}) {
 
   const registry = options.registry || defaultRegistry();
   const {
-    systemPrompt, conversationHistory, userPrompt, participantsMap,
+    systemPrompt, conversationHistory, userPrompt, participantsMap, preflightKbSlugs,
   } = await assembleContext(input, options, registry);
 
   const trimmedHistory = trimToTokenBudget(systemPrompt, conversationHistory, userPrompt);
@@ -383,6 +456,9 @@ async function run(input, options = {}) {
     logger,
   };
   const citationStore = createCitationStore();
+  // Entries the pre-flight pass injected were retrieved for this turn just as
+  // surely as a lookup_kb result, so they are citable without a tool call.
+  for (const slug of preflightKbSlugs || []) citationStore.kb.add(slug);
   const toolResults = [];
   const toolDefinitions = registry.definitions();
 
@@ -540,6 +616,14 @@ async function run(input, options = {}) {
           conversationId: input.conversationId,
         }).catch(err => logger.error(`[Facts] immediate context: ${err.message}`));
       }
+
+      if (DIRECTIVES_ENABLED) {
+        directives.extractStandingDirectives({
+          text: input.text,
+          userId: input.userId,
+          conversationId: input.conversationId,
+        }).catch(err => logger.error(`[Directives] extraction: ${err.message}`));
+      }
     }
 
     return {
@@ -577,5 +661,6 @@ module.exports = {
   parseInlineToolCalls,
   presentMemberIds,
   trimToTokenBudget,
+  pruneDanglingToolMessages,
   applyGuards,
 };

@@ -13,7 +13,7 @@
 const config = require("../../config.js");
 const logger = require("../util/logger");
 const { withLock } = require("../util/lock");
-const { openDatabase } = require("../util/db");
+const { openDatabase, addColumnIfMissing } = require("../util/db");
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS conversations (
@@ -22,6 +22,7 @@ const SCHEMA = `
     topic                    TEXT NOT NULL DEFAULT '',
     summaries                TEXT NOT NULL DEFAULT '[]',
     facts                    TEXT NOT NULL DEFAULT '[]',
+    directives               TEXT NOT NULL DEFAULT '[]',
     participants             TEXT NOT NULL DEFAULT '{}',
     persona                  TEXT,
     reset_point              TEXT,
@@ -48,7 +49,14 @@ const SCHEMA = `
 
 let _db = null;
 function openDb() {
-  if (!_db) _db = openDatabase(process.env.MEMORY_TEST_DB || config.MEMORY_DB_PATH, SCHEMA, "Memory");
+  if (!_db) {
+    _db = openDatabase(process.env.MEMORY_TEST_DB || config.MEMORY_DB_PATH, SCHEMA, "Memory");
+    // Databases created before standing directives existed keep their old
+    // conversations table; the schema above would not touch it.
+    if (addColumnIfMissing(_db, "conversations", "directives", "TEXT NOT NULL DEFAULT '[]'")) {
+      logger.info("[Memory] Migrated conversations table: added directives column.");
+    }
+  }
   return _db;
 }
 
@@ -71,6 +79,7 @@ function defaultConversation(id, name = null) {
     topic: "",
     summaries: [],
     facts: [],
+    directives: [],
     participants: {},
     persona: null,
     resetPoint: null,
@@ -88,6 +97,7 @@ function conversationRow(r) {
     topic: r.topic || "",
     summaries: parseJson(r.summaries, [], `conversation ${r.id}.summaries`),
     facts: parseJson(r.facts, [], `conversation ${r.id}.facts`),
+    directives: parseJson(r.directives, [], `conversation ${r.id}.directives`),
     participants: parseJson(r.participants, {}, `conversation ${r.id}.participants`),
     persona: r.persona ? parseJson(r.persona, null, `conversation ${r.id}.persona`) : null,
     resetPoint: r.reset_point,
@@ -102,6 +112,7 @@ const CONVERSATION_COLUMNS = {
   topic: v => v ?? "",
   summaries: v => JSON.stringify(v ?? []),
   facts: v => JSON.stringify(v ?? []),
+  directives: v => JSON.stringify(v ?? []),
   participants: v => JSON.stringify(v ?? {}),
   persona: v => (v ? JSON.stringify(v) : null),
   resetPoint: v => v ?? null,
@@ -115,6 +126,7 @@ const COLUMN_NAMES = {
   topic: "topic",
   summaries: "summaries",
   facts: "facts",
+  directives: "directives",
   participants: "participants",
   persona: "persona",
   resetPoint: "reset_point",

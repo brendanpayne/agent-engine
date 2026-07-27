@@ -35,6 +35,18 @@ function openDb() {
   return _db;
 }
 
+// Required lazily: preflight indexes this store, so a top-level require here
+// would be a cycle. Every write path drops the cached lexical index for the
+// scope, otherwise a newly approved entry stays invisible to pre-flight until
+// the TTL lapses — which reads as the approval not having worked.
+function invalidatePreflight(scopeId) {
+  try {
+    require("./preflight").invalidate(scopeId);
+  } catch (err) {
+    logger.debug(`[KB] Pre-flight invalidation skipped: ${err.message}`);
+  }
+}
+
 function row(r) {
   if (!r) return null;
   return {
@@ -62,6 +74,7 @@ async function create({ scopeId, slug, title, content, tags, creatorId }) {
       INSERT INTO kb_entries (scope_id, slug, title, content, tags, creator_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(scopeId, slug, title, content, tags || null, creatorId, now, now);
+    invalidatePreflight(scopeId);
     return getById(info.lastInsertRowid);
   });
 }
@@ -82,6 +95,7 @@ async function update({ scopeId, slug, title, content, tags }) {
       tags !== undefined ? tags : current.tags,
       Date.now(), scopeId, slug,
     );
+    invalidatePreflight(scopeId);
     return getBySlug(scopeId, slug);
   });
 }
@@ -99,7 +113,9 @@ function listForScope(scopeId) {
 }
 
 function deleteBySlug(scopeId, slug) {
-  return openDb().prepare("DELETE FROM kb_entries WHERE scope_id=? AND slug=?").run(scopeId, slug).changes > 0;
+  const removed = openDb().prepare("DELETE FROM kb_entries WHERE scope_id=? AND slug=?").run(scopeId, slug).changes > 0;
+  if (removed) invalidatePreflight(scopeId);
+  return removed;
 }
 
 function getUnembedded(limit = 100) {

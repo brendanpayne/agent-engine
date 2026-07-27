@@ -22,6 +22,18 @@ function openDatabase(relativePath, schemaSql, label) {
   return db;
 }
 
+// Additive migration for a table that already exists in a deployed database.
+// CREATE TABLE IF NOT EXISTS is a no-op once the table is there, so a column
+// added to a schema string later would never reach an existing file. Reading
+// table_info first keeps this idempotent without relying on error text.
+function addColumnIfMissing(db, table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.length === 0) return false;
+  if (columns.some(c => c.name === column)) return false;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
+}
+
 // Cosine similarity over two equal-length vectors. Shared by every semantic
 // search path (knowledge base, archive, episodes).
 function cosineSimilarity(a, b) {
@@ -55,6 +67,7 @@ function toFloat32(vec) {
 
 module.exports = {
   openDatabase,
+  addColumnIfMissing,
   cosineSimilarity,
   bufferToFloatArray,
   embeddingToBuffer,

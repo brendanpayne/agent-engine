@@ -3,7 +3,7 @@ process.env.MEMORY_TEST_DB = path.join(__dirname, "../tmp/loop-test.sqlite");
 
 const {
   accumulateToolCalls, parseInlineToolCalls, presentMemberIds,
-  trimToTokenBudget, applyGuards,
+  trimToTokenBudget, pruneDanglingToolMessages, applyGuards,
 } = require("../../src/agent/loop");
 
 describe("accumulateToolCalls", () => {
@@ -72,6 +72,44 @@ describe("trimToTokenBudget", () => {
     const trimmed = trimToTokenBudget("sys", history, "q");
     expect(trimmed.length).toBeLessThan(20);
     expect(trimmed.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("pruneDanglingToolMessages", () => {
+  const assistantCall = (...ids) => ({
+    role: "assistant", content: null, tool_calls: ids.map(id => ({ id, function: { name: "t" } })),
+  });
+  const toolReply = id => ({ role: "tool", tool_call_id: id, content: "{}" });
+
+  it("leaves a well-paired history untouched", () => {
+    const history = [
+      { role: "user", content: "hi" },
+      assistantCall("c1"),
+      toolReply("c1"),
+      { role: "assistant", content: "done" },
+    ];
+    expect(pruneDanglingToolMessages(history)).toEqual(history);
+  });
+
+  it("drops a tool reply whose call was trimmed away", () => {
+    const out = pruneDanglingToolMessages([toolReply("c1"), { role: "assistant", content: "done" }]);
+    expect(out).toEqual([{ role: "assistant", content: "done" }]);
+  });
+
+  it("drops an assistant tool_calls message whose replies were trimmed away", () => {
+    const out = pruneDanglingToolMessages([assistantCall("c1"), { role: "user", content: "next" }]);
+    expect(out).toEqual([{ role: "user", content: "next" }]);
+  });
+
+  it("drops a partially answered call and the reply that survived with it", () => {
+    // c2's reply was cut, so the assistant message goes — which orphans c1's
+    // reply, and the fixpoint loop has to remove that on a second pass.
+    const out = pruneDanglingToolMessages([assistantCall("c1", "c2"), toolReply("c1")]);
+    expect(out).toEqual([]);
+  });
+
+  it("handles an empty history", () => {
+    expect(pruneDanglingToolMessages([])).toEqual([]);
   });
 });
 

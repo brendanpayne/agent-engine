@@ -7,6 +7,7 @@ const citations = require("./citations");
 
 module.exports = {
   run: loop.run,
+  loop,
   defaultRegistry: loop.defaultRegistry,
   ToolRegistry,
   executeToolCall,

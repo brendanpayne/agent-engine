@@ -10,24 +10,28 @@
 //   1. Persona / behavioral rules for this conversation type
 //   2. Topic / background
 //   3. Identity rules
-//   4. Conversation facts
-//   5. Conversation summary
-//   6. User summary
-//   7. User facts
-//   8. Tool instructions
-//   9. Perception block (attachments, fetched links)
-//  10. Participant roster
-//  11. Dynamic tail (time, current speaker, reply context)
+//   4. Standing directives (near-static per conversation — kept high for cache reuse)
+//   5. Conversation facts
+//   6. Conversation summary
+//   7. User summary
+//   8. User facts
+//   9. Knowledge-base context (pre-flight retrieval for this turn)
+//  10. Tool instructions
+//  11. Perception block (attachments, fetched links)
+//  12. Participant roster
+//  13. Dynamic tail (time, current speaker, reply context)
 
 function assembleSystemPrompt(parts) {
   return [
     parts.personaBlock,
     parts.topicBlock,
     parts.identityRulesBlock,
+    parts.directivesBlock,
     parts.conversationFactsBlock,
     parts.conversationSummaryBlock,
     parts.userSummaryBlock,
     parts.userFactsBlock,
+    parts.kbContextBlock,
     parts.toolBlock,
     parts.perceptionBlock,
     parts.participantsBlock,
@@ -44,6 +48,11 @@ const IDENTITY_RULES_BLOCK = [
   "- Facts are grouped per person under [UserFacts name=\"...\" id=\"...\"]. Attribute each fact only to the person whose block it appears in — never assume one person's facts belong to another.",
   "- When someone's facts contain previous_name=Y but they now speak under a different name, treat Y as that same person's former display name. Reconcile by ID, not by name.",
   "- Never argue with someone about their own identity or preferences. If they correct you, accept it immediately and do not reference the earlier mistake.",
+  "",
+  "[Memory Use]",
+  "- Before asking for a detail, check the fact blocks above. If a stored fact plausibly answers it, use it instead of asking — asking for something you already know reads as forgetting.",
+  "- When an image or link you are looking at shows something a stored fact covers (a pet, a project, a place), connect them: refer to it by the name you already have rather than asking what it is.",
+  "- Recall confidently but never invent. If no fact covers it, ask — do not guess a name or detail that is not stored.",
 ].join("\n");
 
 // Neutral default persona. Applications are expected to replace this with their
@@ -87,6 +96,12 @@ function buildToolBlock(registry, { citations = true } = {}) {
   for (const name of registry.names()) {
     const description = registry.get(name).description.split(". ")[0];
     lines.push(`- ${name}: ${description}`);
+  }
+  if (registry.has("lookup_kb")) {
+    lines.push(
+      "If a [KnowledgeBase] block appears above, those entries were already retrieved for this turn — " +
+      "answer from them directly and call lookup_kb only for a topic they do not cover.",
+    );
   }
   if (citations && (registry.has("search_history") || registry.has("lookup_kb"))) {
     lines.push(

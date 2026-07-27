@@ -20,17 +20,13 @@ const {
   IMMEDIATE_FACTS_ENABLED,
   IMMEDIATE_FACTS_MIN_LENGTH,
   IMMEDIATE_FACTS_DEBOUNCE_MS,
+  FACT_RELEVANCE_WEIGHT,
 } = require("../../config.js");
 const logger = require("../util/logger");
 const { withLock } = require("../util/lock");
+const { tokenize } = require("../util/text");
 const { chatWithSchema } = require("../schemas");
 const store = require("./store");
-
-const STOPWORDS = new Set([
-  "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "is", "are", "was", "were",
-  "i", "im", "me", "my", "you", "your", "it", "its", "this", "that", "for", "with", "as", "be", "do",
-  "does", "did", "not", "no", "so", "if", "than", "then", "from", "by", "he", "she", "they", "we",
-]);
 
 // Gates for the immediate (per-message) classifier. Running an LLM call on
 // every message is wasteful when most carry no durable information, so a cheap
@@ -43,10 +39,7 @@ const CONTEXT_KEYWORDS = /\b(tomorrow|tonight|today|yesterday|next\s+week|meetin
 const _debounce = new Map();
 
 function tokenizeValue(v) {
-  return (v || "")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(t => t && t.length > 1 && !STOPWORDS.has(t));
+  return tokenize(v);
 }
 
 function normalizeFactKey(rawKey) {
@@ -80,6 +73,27 @@ function checkDebounce(bucketKey) {
   return true;
 }
 
+// Shared entry gate for every background extractor (user facts, context facts,
+// standing directives). These each ran the same keyword-gate → incognito →
+// debounce sequence as separate copies, which is how a guard added to one came
+// to be missing from another. One implementation means a check added here
+// cannot silently apply to only some scopes.
+function shouldExtract({ label, text, gate, userId, conversationId, debounceKey }) {
+  if (!text || !gate(text)) {
+    logger.debug(`[${label}] skipped: gate (len=${text?.length ?? 0})`);
+    return false;
+  }
+  if (userId && store.isIncognito(userId, conversationId)) {
+    logger.debug(`[${label}] skipped: speaker incognito`);
+    return false;
+  }
+  if (!checkDebounce(debounceKey)) {
+    logger.debug(`[${label}] skipped: debounce`);
+    return false;
+  }
+  return true;
+}
+
 function cleanupExpiredFacts(facts) {
   if (!FACT_TTL_DAYS || !Array.isArray(facts)) return facts;
   const ttlMs = FACT_TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -97,21 +111,68 @@ function isCoreIdentityKey(key) {
   return /^(name|age|location|job|language)(_|$)/.test(key || "");
 }
 
-// Recency and reinforcement, weighted 60/40. Recency dominates because a stale
-// fact is more likely to be wrong than an unrepeated one is to be unimportant.
-function scoreFacts(facts, now = Date.now()) {
+// Lexical overlap between the current turn's cue tokens and a fact. Without
+// this, selection is purely recency+reinforcement, so a fact that answers the
+// question being asked right now loses its slot to unrelated recent chatter.
+// A cue hitting the fact's KEY ("cat" against pet_cat_name) is a much stronger
+// signal than one hitting its value, so a single key match alone is already
+// enough to pull a stale fact into the prompt.
+function relevanceScore(fact, cueTokens) {
+  if (!cueTokens || cueTokens.size === 0) return 0;
+  const keyTokens = new Set(tokenizeValue(fact.key));
+  const valueTokens = new Set(tokenizeValue(fact.value));
+  let keyHits = 0;
+  let valueHits = 0;
+  for (const t of cueTokens) {
+    if (keyTokens.has(t)) keyHits++;
+    else if (valueTokens.has(t)) valueHits++;
+  }
+  if (keyHits === 0 && valueHits === 0) return 0;
+  return Math.min(1, keyHits * 0.6 + valueHits * 0.4);
+}
+
+// Perception payloads run to thousands of characters (a fetched page body).
+// Feeding all of it in would make almost every stored fact score a relevance
+// hit, flattening the ranking this scoring exists to sharpen — so only the
+// leading, most topical slice of a perception block is used as a cue.
+const CUE_PERCEPTION_CHARS = 300;
+
+function cueSlice(text) {
+  return typeof text === "string" ? text.slice(0, CUE_PERCEPTION_CHARS) : text;
+}
+
+// Cue tokens for relevance scoring: what is actually being talked about this
+// turn (the message text plus any image/link perception).
+function buildCueTokens(...texts) {
+  const tokens = new Set();
+  for (const text of texts) {
+    if (!text) continue;
+    for (const t of tokenizeValue(text)) tokens.add(t);
+  }
+  return tokens;
+}
+
+// Recency and reinforcement, weighted 60/40, blended with relevance to the
+// current turn when cue tokens are supplied. Recency dominates the base score
+// because a stale fact is more likely to be wrong than an unrepeated one is to
+// be unimportant.
+function scoreFacts(facts, now = Date.now(), cueTokens = null) {
   const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
+  const relWeight = (cueTokens && cueTokens.size > 0) ? (FACT_RELEVANCE_WEIGHT ?? 0) : 0;
+  const remaining = 1 - relWeight;
   return facts.map(f => {
     const age = Math.max(0, now - (f.updatedAt || 0));
     const recencyScore = Math.max(0, 1 - age / ninetyDaysMs);
     const reinforceNorm = Math.min(1, (f.reinforcedCount || 1) / 5);
-    return { ...f, _score: reinforceNorm * 0.4 + recencyScore * 0.6 };
+    const base = reinforceNorm * 0.4 + recencyScore * 0.6;
+    return { ...f, _score: base * remaining + relevanceScore(f, cueTokens) * relWeight };
   });
 }
 
 // Renders the highest-value facts as a prompt block. `maxOverride` lets several
-// blocks share one total budget (see buildMultiUserFactsBlock).
-function buildFactsBlock(tag, factsArray, maxOverride = null) {
+// blocks share one total budget (see buildMultiUserFactsBlock). `cueTokens`
+// biases selection toward what this turn is actually about.
+function buildFactsBlock(tag, factsArray, maxOverride = null, cueTokens = null) {
   if (!Array.isArray(factsArray) || factsArray.length === 0) return "";
 
   const filtered = factsArray.filter(f => {
@@ -125,7 +186,7 @@ function buildFactsBlock(tag, factsArray, maxOverride = null) {
 
   const core = filtered.filter(f => isCoreIdentityKey(f.key));
   const rest = filtered.filter(f => !isCoreIdentityKey(f.key));
-  const scored = scoreFacts(rest).sort((a, b) => b._score - a._score);
+  const scored = scoreFacts(rest, Date.now(), cueTokens).sort((a, b) => b._score - a._score);
   const effectiveMax = (maxOverride !== null && maxOverride !== undefined)
     ? maxOverride
     : (LOW_BUDGET_MODE
@@ -144,7 +205,7 @@ function buildFactsBlock(tag, factsArray, maxOverride = null) {
 // One block per participant who spoke recently. The current speaker gets ~60%
 // of the budget and the rest is split evenly, so the model can reason about
 // everyone present without conflating their identities.
-function buildMultiUserFactsBlock(currentUserId, orderedIds, perUserFacts, nameOf) {
+function buildMultiUserFactsBlock(currentUserId, orderedIds, perUserFacts, nameOf, cueTokens = null) {
   const totalBudget = LOW_BUDGET_MODE
     ? Math.min(MAX_FACTS_IN_PROMPT || 8, 8)
     : (MAX_FACTS_IN_PROMPT || 15);
@@ -160,7 +221,7 @@ function buildMultiUserFactsBlock(currentUserId, orderedIds, perUserFacts, nameO
     if (!Array.isArray(facts) || facts.length === 0) continue;
     const budget = uid === currentUserId ? speakerBudget : otherBudgetEach;
     if (budget <= 0) continue;
-    const block = buildFactsBlock(`UserFacts name="${nameOf(uid) || "user"}" id="${uid}"`, facts, budget);
+    const block = buildFactsBlock(`UserFacts name="${nameOf(uid) || "user"}" id="${uid}"`, facts, budget, cueTokens);
     if (block) blocks.push(block);
   }
   return blocks.join("\n\n");
@@ -448,9 +509,14 @@ async function mergeUserFacts(subjectId, newFacts, sourceText) {
 // in Bob's store and surfaces when Bob speaks — not the author's.
 async function extractImmediateUserFacts({ text, userId, userName, conversationId, participants }) {
   if (!IMMEDIATE_FACTS_ENABLED) return;
-  if (shouldSkipImmediate(text, "user")) return;
-  if (store.isIncognito(userId, conversationId)) return;
-  if (!checkDebounce(`user:${userId}`)) return;
+  if (!shouldExtract({
+    label: `Facts user [${userId}]`,
+    text,
+    gate: t => !shouldSkipImmediate(t, "user"),
+    userId,
+    conversationId,
+    debounceKey: `user:${userId}`,
+  })) return;
 
   const parsed = await runImmediateClassifier(text, "user");
   if (parsed.length === 0) return;
@@ -475,9 +541,14 @@ async function extractImmediateUserFacts({ text, userId, userName, conversationI
 
 async function extractImmediateContextFacts({ text, userId, conversationId }) {
   if (!IMMEDIATE_FACTS_ENABLED) return;
-  if (shouldSkipImmediate(text, "conversation")) return;
-  if (userId && store.isIncognito(userId, conversationId)) return;
-  if (!checkDebounce(`conversation:${conversationId}`)) return;
+  if (!shouldExtract({
+    label: `Facts conversation [${conversationId}]`,
+    text,
+    gate: t => !shouldSkipImmediate(t, "conversation"),
+    userId,
+    conversationId,
+    debounceKey: `conversation:${conversationId}`,
+  })) return;
 
   const parsed = await runImmediateClassifier(text, "conversation");
   if (parsed.length === 0) return;
@@ -497,9 +568,10 @@ function resetDebounce() {
 
 module.exports = {
   tokenizeValue, normalizeFactKey, detectConfidence, cleanupExpiredFacts,
-  isCoreIdentityKey, scoreFacts, buildFactsBlock, buildMultiUserFactsBlock,
+  isCoreIdentityKey, scoreFacts, relevanceScore, buildCueTokens, cueSlice,
+  buildFactsBlock, buildMultiUserFactsBlock,
   valueOverlapsExisting, mergeFacts, sortAndPruneFacts, compressFacts,
   runImmediateClassifier, resolveSubjectId, mergeUserFacts,
   extractImmediateUserFacts, extractImmediateContextFacts,
-  shouldSkipImmediate, resetDebounce,
+  shouldSkipImmediate, shouldExtract, resetDebounce,
 };

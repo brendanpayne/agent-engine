@@ -7,6 +7,7 @@ const { lookupKb, proposeKbEntry } = require("./knowledge");
 const { searchHistory, recallEpisode } = require("./recall");
 const { generateImage } = require("./media");
 const { setReminder } = require("./reminders");
+const { setDirective, removeDirective } = require("./directives");
 
 const BUILTIN_TOOLS = [
   webSearch,
@@ -17,10 +18,13 @@ const BUILTIN_TOOLS = [
   recallEpisode,
   generateImage,
   setReminder,
+  setDirective,
+  removeDirective,
 ];
 
 module.exports = {
   BUILTIN_TOOLS,
   webSearch, fetchPage, lookupKb, proposeKbEntry,
   searchHistory, recallEpisode, generateImage, setReminder,
+  setDirective, removeDirective,
 };

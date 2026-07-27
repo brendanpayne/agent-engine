@@ -61,6 +61,27 @@ const config = {
   IMMEDIATE_FACTS_ENABLED: bool("IMMEDIATE_FACTS_ENABLED", true),
   IMMEDIATE_FACTS_MIN_LENGTH: num("IMMEDIATE_FACTS_MIN_LENGTH", 20),
   IMMEDIATE_FACTS_DEBOUNCE_MS: num("IMMEDIATE_FACTS_DEBOUNCE_MS", 30000),
+  // Weight of lexical relevance-to-the-current-turn in fact selection. The
+  // remaining weight is split between reinforcement and recency. Set to 0 to
+  // restore purely recency-based selection.
+  FACT_RELEVANCE_WEIGHT: num("FACT_RELEVANCE_WEIGHT", 0.5),
+
+  // --- Standing directives --------------------------------------------------
+  // Persistent behavioral rules a conversation has asked the agent to follow.
+  // Unlike facts these never expire and are never compressed.
+  DIRECTIVES_ENABLED: bool("DIRECTIVES_ENABLED", true),
+  MAX_DIRECTIVES: num("MAX_DIRECTIVES", 10),
+  DIRECTIVE_MAX_LENGTH: num("DIRECTIVE_MAX_LENGTH", 300),
+
+  // --- Knowledge-base pre-flight --------------------------------------------
+  // Deterministic lexical match (no embedding call) of each inbound turn
+  // against KB titles/tags/content, injected into the prompt so the model does
+  // not have to spend a lookup_kb tool call to see a relevant entry.
+  KB_PREFLIGHT_ENABLED: bool("KB_PREFLIGHT_ENABLED", true),
+  KB_PREFLIGHT_MIN_SCORE: num("KB_PREFLIGHT_MIN_SCORE", 0.25),
+  KB_PREFLIGHT_MAX_ENTRIES: num("KB_PREFLIGHT_MAX_ENTRIES", 2),
+  KB_PREFLIGHT_CONTENT_CHARS: num("KB_PREFLIGHT_CONTENT_CHARS", 400),
+  KB_PREFLIGHT_INDEX_TTL_MS: num("KB_PREFLIGHT_INDEX_TTL_MS", 600000),
 
   // --- Archive & episodes ---------------------------------------------------
   ARCHIVE_RETENTION_DAYS: num("ARCHIVE_RETENTION_DAYS", 90),
