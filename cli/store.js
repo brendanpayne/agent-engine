@@ -41,6 +41,16 @@ const SCHEMA = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+
+  CREATE TABLE IF NOT EXISTS contexts (
+    session_id      TEXT PRIMARY KEY,
+    characteristics TEXT NOT NULL DEFAULT '',
+    personality     TEXT NOT NULL DEFAULT '',
+    preferences     TEXT NOT NULL DEFAULT '',
+    dialog          TEXT NOT NULL DEFAULT '',
+    boundaries      TEXT NOT NULL DEFAULT '',
+    updated_at      INTEGER NOT NULL
+  );
 `;
 
 // Columns added after the first release. CREATE TABLE IF NOT EXISTS is a no-op
@@ -164,9 +174,79 @@ function setTopic(id, topic) {
 function deleteSession(id) {
   const tx = db().transaction(() => {
     db().prepare("DELETE FROM messages WHERE session_id = ?").run(id);
+    db().prepare("DELETE FROM contexts WHERE session_id = ?").run(id);
     db().prepare("DELETE FROM sessions WHERE id = ?").run(id);
   });
   tx();
+}
+
+// --- Roleplay context ------------------------------------------------------
+//
+// One row per channel, holding the character fields defined in cli/context.js.
+// Absent means "no character set", which reads the same as every field blank —
+// so getContext always returns a full row and callers never branch on null.
+
+const CONTEXT_FIELDS = ["characteristics", "personality", "preferences", "dialog", "boundaries"];
+
+function contextRow(r) {
+  const out = {};
+  for (const key of CONTEXT_FIELDS) out[key] = r?.[key] || "";
+  out.updatedAt = r?.updated_at || 0;
+  return out;
+}
+
+function getContext(sessionId) {
+  return contextRow(db().prepare("SELECT * FROM contexts WHERE session_id = ?").get(sessionId));
+}
+
+// Patch semantics: only the keys present are written, so setting one field
+// cannot silently blank the other four.
+function setContext(sessionId, patch) {
+  const current = getContext(sessionId);
+  const next = { ...current };
+  for (const key of CONTEXT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(patch, key)) next[key] = String(patch[key] ?? "");
+  }
+
+  db().prepare(`
+    INSERT INTO contexts (session_id, characteristics, personality, preferences, dialog, boundaries, updated_at)
+    VALUES (@session_id, @characteristics, @personality, @preferences, @dialog, @boundaries, @updated_at)
+    ON CONFLICT(session_id) DO UPDATE SET
+      characteristics = excluded.characteristics,
+      personality     = excluded.personality,
+      preferences     = excluded.preferences,
+      dialog          = excluded.dialog,
+      boundaries      = excluded.boundaries,
+      updated_at      = excluded.updated_at
+  `).run({
+    session_id: sessionId,
+    characteristics: next.characteristics,
+    personality: next.personality,
+    preferences: next.preferences,
+    dialog: next.dialog,
+    boundaries: next.boundaries,
+    updated_at: Date.now(),
+  });
+
+  return getContext(sessionId);
+}
+
+// Clearing one field is a patch; clearing everything drops the row, so a
+// cleared channel is indistinguishable from one that never had a character.
+function clearContext(sessionId, key = null) {
+  if (key) return setContext(sessionId, { [key]: "" });
+  db().prepare("DELETE FROM contexts WHERE session_id = ?").run(sessionId);
+  return getContext(sessionId);
+}
+
+// Which channels have a character set — for listings, so a roleplay channel is
+// visible as one without opening it.
+function contextSessionIds() {
+  const rows = db().prepare(`
+    SELECT session_id FROM contexts
+    WHERE TRIM(characteristics || personality || preferences || dialog || boundaries) <> ''
+  `).all();
+  return new Set(rows.map(r => r.session_id));
 }
 
 function appendMessage({
@@ -409,6 +489,7 @@ function close() {
 module.exports = {
   createSession, listSessions, getSession, latestSession, resolveSession,
   renameSession, setTopic, deleteSession, channelName,
+  getContext, setContext, clearContext, contextSessionIds,
   appendMessage, allMessages, lastMessages, messageByRef, lastMessageOfRole,
   searchMessages, toggleReaction, setPinned, listPinned, editMessage, deleteMessage,
   members, historyForEngine, clearMessages,

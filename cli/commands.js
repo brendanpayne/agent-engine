@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const settingsModule = require("./settings");
+const contextModule = require("./context");
 
 const COMMANDS = [];
 function define(cmd) { COMMANDS.push(cmd); return cmd; }
@@ -162,10 +163,12 @@ define({
     const sessions = ctx.store.listSessions();
     if (sessions.length === 0) return warn(ctx, "No channels yet — /new to make one.");
 
+    const inCharacter = ctx.store.contextSessionIds();
     const fields = sessions.map((s) => {
       const here = s.id === ctx.session.id;
       const name = `${here ? ui.c.accent("▸") : " "} ${here ? ui.c.accent(`#${channelOf(ctx, s)}`) : `#${channelOf(ctx, s)}`}`;
-      const meta = `${String(s.messageCount).padStart(4)} msgs   ${ui.padEndVisible(ui.ago(s.updatedAt), 10)} ${ui.c.muted(s.id)}`;
+      const mask = inCharacter.has(s.id) ? ui.c.warn(" 🎭") : "";
+      const meta = `${String(s.messageCount).padStart(4)} msgs   ${ui.padEndVisible(ui.ago(s.updatedAt), 10)} ${ui.c.muted(s.id)}${mask}`;
       return { name, value: meta };
     });
     emit(ctx, ui.embed({
@@ -214,6 +217,104 @@ define({
     ctx.store.setTopic(ctx.session.id, next);
     ctx.session.topic = next;
     ok(ctx, next ? "Topic updated." : "Topic cleared.");
+  },
+});
+
+// --- Roleplay context ------------------------------------------------------
+
+function renderContext(ctx, context) {
+  const ui = ctx.ui;
+  const set = contextModule.isSet(context);
+
+  emit(ctx, ui.embed({
+    title: `Context — ${channelLabel(ctx, ctx.session)}`,
+    description: set
+      ? "The bot is in character in this channel. This replaces the persona for these turns."
+      : "No character set here. `/context set <field> <text>` starts one.",
+    fields: contextModule.FIELDS.map((f) => {
+      const value = String(context[f.key] || "").trim();
+      return {
+        name: f.label,
+        value: value || ui.c.muted(`(unset) ${f.describe}`),
+        block: Boolean(value),
+      };
+    }),
+    footer: set
+      ? "/context clear [field] to remove · /context show to see the prompt"
+      : `e.g. /context set personality ${contextModule.FIELDS[1].example}`,
+  }));
+}
+
+define({
+  name: "context", aliases: ["rp"], usage: "/context [set|clear|show] …", group: "channel",
+  description: "Set a character for this channel — the per-channel roleplay context.",
+  detail: [
+    "Five fields describe a character: characteristics, personality, preferences, dialog, boundaries.",
+    "",
+    "  /context                     show what is set here",
+    "  /context set <field> <text>  set one field",
+    "  /context clear [field]       clear one field, or the whole character",
+    "  /context show                print the exact persona the model receives",
+    "",
+    "Set on any field and the bot plays that character in this channel only, overriding /persona. Other channels are unaffected — that is the point of it being per-channel.",
+    "",
+    "The channel /topic, if set, is passed along as the character's background.",
+  ].join("\n"),
+  handler: (ctx, args) => {
+    const ui = ctx.ui;
+    const sub = (args[0] || "").toLowerCase();
+    const context = ctx.store.getContext(ctx.session.id);
+
+    if (!sub || sub === "get" || sub === "list") return renderContext(ctx, context);
+
+    if (sub === "show") {
+      const persona = contextModule.buildPersona(context, {
+        channelName: channelOf(ctx),
+        topic: ctx.session.topic,
+      });
+      if (!persona) return warn(ctx, "No character set here, so the engine default persona is used.");
+      return emit(ctx, ui.embed({
+        title: "Persona sent to the model",
+        fields: persona.split("\n").map(line => ({ name: "", value: line || " " })),
+        inlineWidth: 0,
+        footer: "Passed as options.persona on every turn in this channel",
+      }));
+    }
+
+    if (sub === "set") {
+      const f = contextModule.field(args[1]);
+      if (!f) {
+        return warn(ctx, `Usage: /context set <${contextModule.KEYS.join("|")}> <text>`);
+      }
+      const value = contextModule.coerceValue(args.slice(2).join(" "));
+      if (!value) return warn(ctx, `Usage: /context set ${f.key} <text>   (e.g. ${f.example})`);
+
+      const before = contextModule.isSet(context);
+      ctx.store.setContext(ctx.session.id, { [f.key]: value });
+      ok(ctx, `${f.label} set.`);
+      if (value.length === contextModule.MAX_FIELD_LENGTH) {
+        warn(ctx, `Truncated to ${contextModule.MAX_FIELD_LENGTH} characters.`);
+      }
+      if (!before) {
+        ctx.out(`  ${ui.c.muted(`The bot is now in character in ${channelLabel(ctx, ctx.session)}. /context to review.`)}`);
+      }
+      return undefined;
+    }
+
+    if (sub === "clear" || sub === "reset") {
+      if (args[1]) {
+        const f = contextModule.field(args[1]);
+        if (!f) return fail(ctx, `No field "${args[1]}". One of: ${contextModule.KEYS.join(", ")}.`);
+        ctx.store.clearContext(ctx.session.id, f.key);
+        return ok(ctx, `${f.label} cleared.`);
+      }
+      if (!contextModule.isSet(context)) return warn(ctx, "Nothing to clear.");
+      ctx.store.clearContext(ctx.session.id);
+      ok(ctx, `Character cleared. ${channelLabel(ctx, ctx.session)} is back to the normal persona.`);
+      return undefined;
+    }
+
+    return fail(ctx, `Unknown subcommand "${sub}". Try /context, /context set, /context clear, /context show.`);
   },
 });
 
@@ -580,6 +681,12 @@ define({
       title: `${ctx.settings.botName} ${ui.c.success("● online")}`,
       fields: [
         { name: "model", value: ctx.settings.model || `${ctx.engine.config.CONVO_MODEL} (engine default)` },
+        {
+          name: "persona",
+          value: contextModule.isSet(ctx.store.getContext(ctx.session.id))
+            ? `${ui.c.warn("in character")} ${ui.c.muted("(/context)")}`
+            : (ctx.settings.persona ? "custom (/persona)" : "engine default"),
+        },
         { name: "tools", value: ctx.settings.tools ? `${ctx.registry.definitions().length} available` : "disabled" },
         { name: "memory writes", value: ctx.settings.memory ? "on" : "off" },
         { name: "streaming", value: ctx.settings.stream ? "on" : "off" },
@@ -879,6 +986,28 @@ function argumentItems(cmd, parts, ctx) {
       return ctx.ui.themeNames().map(name => ({
         value: name, label: name, hint: name === ctx.settings.theme ? "current" : "",
       }));
+
+    case "context": {
+      if (parts.length === 2) {
+        return [
+          { value: "set", label: "set", hint: "Set one field of the character" },
+          { value: "clear", label: "clear", hint: "Clear a field, or the whole character" },
+          { value: "show", label: "show", hint: "Print the persona the model receives" },
+        ];
+      }
+      // Both `set` and `clear` take a field name next; nothing else does.
+      if (parts.length === 3 && ["set", "clear", "reset"].includes(parts[1].toLowerCase())) {
+        const current = ctx.store.getContext(ctx.session.id);
+        return contextModule.FIELDS.map(f => ({
+          value: f.key,
+          label: f.label,
+          hint: String(current[f.key] || "").trim()
+            ? `set — ${String(current[f.key]).slice(0, 40)}`
+            : f.describe,
+        }));
+      }
+      return [];
+    }
 
     case "help":
       return commandItems();

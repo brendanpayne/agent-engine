@@ -33,6 +33,7 @@ const engine = require("../index.js");
 const store = require("./store");
 const commands = require("./commands");
 const autocomplete = require("./autocomplete");
+const contextModule = require("./context");
 const ui = require("./ui");
 
 const pkg = require("../package.json");
@@ -162,6 +163,17 @@ function saveAttachment(a) {
 
 // --- A turn ----------------------------------------------------------------
 
+// Persona precedence: a character set for this channel beats the global
+// /persona, which beats the engine default. Most specific wins, and the
+// per-channel one is the only one a user sets while looking at that channel.
+function personaFor(session) {
+  const character = contextModule.buildPersona(store.getContext(session.id), {
+    channelName: store.channelName(session.title || session.id),
+    topic: session.topic,
+  });
+  return character || settings.persona || null;
+}
+
 async function runTurn(ctx, text, opts = {}) {
   const messageId = `cli-${Date.now()}`;
   const timestamp = Date.now();
@@ -175,6 +187,7 @@ async function runTurn(ctx, text, opts = {}) {
     .slice(0, 10)
     .map(m => ({ id: m.userId, name: m.userName }));
 
+  const persona = personaFor(ctx.session);
   const indicator = settings.typingIndicator ? ui.typing(settings.botName) : { stop() {} };
   let writer = null;
   let headerPrinted = false;
@@ -222,7 +235,7 @@ async function runTurn(ctx, text, opts = {}) {
         registry: settings.tools ? registry : emptyRegistry,
         history: store.historyForEngine(ctx.session.id, settings.historyDepth),
         updateMemory: settings.memory,
-        ...(settings.persona ? { persona: settings.persona } : {}),
+        ...(persona ? { persona } : {}),
         ...(settings.toolDepth ? { maxToolDepth: settings.toolDepth } : {}),
         ...(settings.stream
           ? {
@@ -329,6 +342,7 @@ function showChannelHeader(ctx) {
     topic: ctx.session.topic,
     messageCount: ctx.session.messageCount,
     memberCount: store.members(ctx.session.id).length,
+    inCharacter: contextModule.isSet(store.getContext(ctx.session.id)),
   })) out(line);
 }
 

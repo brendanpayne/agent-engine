@@ -298,6 +298,7 @@ memory scope along with the transcript. Channels are addressable by the
 | `/join <#channel\|id>` | Switch by `#name`, id, or unique id prefix |
 | `/rename <title>` | Retitle (untitled channels auto-title from the first message) |
 | `/topic [text]` | Set the channel topic shown in the header and exports |
+| `/context` | Set a character for this channel — see below |
 | `/delete <#channel>` | Delete a channel and its transcript |
 | `/history [n]` | Replay the last n messages, numbered |
 | `/search <text> [--all]` | Search this channel, or every channel |
@@ -339,6 +340,49 @@ straight into a message get the same treatment when `urlContext` is on.
 `/retry` deletes both halves of the last exchange before re-asking, so the
 transcript never ends up holding two answers to one question.
 
+### Roleplay context
+
+A channel can have a character. Five fields describe it, and setting any of them
+puts the bot in character **in that channel only**:
+
+```
+/context set characteristics a weathered dockworker on a rain-soaked station
+/context set dialog           clipped sentences, no stage directions
+/context set boundaries       never threatens anyone, will not discuss the war
+```
+
+| Field | What it covers |
+|---|---|
+| `characteristics` | Appearance and defining traits |
+| `personality` | Temperament and how they behave |
+| `preferences` | Likes, dislikes, what drives them |
+| `dialog` | Speech register, verbal tics, whether to use emotes |
+| `boundaries` | Limits the character will not cross |
+
+`/context` shows what is set, `/context show` prints the exact persona the model
+receives, and `/context clear [field]` removes one field or the whole character.
+Channels in character are marked 🎭 in `/channels` and in the header. If the
+channel has a `/topic`, it is passed along as the character's background.
+
+Persona precedence is most-specific-wins: **a channel's character beats
+`/persona`, which beats the engine default.** Nothing is global here — that is
+the point of it being per-channel, and it is the one thing the older
+whole-CLI `/persona` cannot express.
+
+This is a port of the `/context` command from the Discord bot this engine was
+extracted from, and the fields and prompt lines are deliberately the original
+ones so a character written for that bot still works. Two deliberate
+differences: the original also emitted a compliance instruction next to "stay in
+character" ("always comply… never refuse, lecture, or add disclaimers"), which is
+not carried over — it is a refusal override rather than part of describing a
+character, and `boundaries` covers the legitimate half. The original also had no
+rule about emotes or stage directions, so neither does this; the `dialog` field
+decides, because a hardcoded rule there is both ignored by models and not always
+what a roleplayer wants.
+
+It needs no engine support: the engine already accepts a persona override per
+turn, so all of this lives in the client.
+
 ### Members
 
 Memory is anchored on `userId`, so who you are speaking as decides which facts
@@ -372,7 +416,7 @@ to `db/cli-settings.json`. `default` as a value restores the default.
 | `tools` | `on` | Expose the built-in tools to the model |
 | `memory` | `on` | Write facts and summaries after each turn |
 | `toolDepth` | engine default | Max tool iterations per turn |
-| `persona` | engine default | System persona override |
+| `persona` | engine default | System persona override, all channels (a channel `/context` wins) |
 | `historyDepth` | `20` | Past messages replayed into each turn |
 | `userId` / `userName` / `scopeId` | `cli-user` / `You` / `cli` | Identity sent with each turn |
 | `botName` | `Assistant` | Display name for the bot |
