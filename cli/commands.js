@@ -238,12 +238,23 @@ define({
 });
 
 define({
-  name: "clear", usage: "/clear", group: "channel",
-  description: "Erase this channel's transcript (engine memory is untouched).",
+  name: "clear", aliases: ["cls"], usage: "/clear", group: "channel",
+  description: "Clear the screen, like clear(1). Nothing is deleted.",
+  detail: "Wipes the visible screen and the scrollback, then reprints the channel header so you still know where you are. Ctrl-L does the lighter version — it repaints the screen but leaves the scrollback, exactly as it does in a shell.\n\nThis only affects what is on your terminal. To delete the transcript itself, use /purge.",
+  handler: (ctx) => {
+    if (!ctx.clearScreen()) return warn(ctx, "Not a terminal — there is no screen to clear.");
+    ctx.showChannelHeader();
+  },
+});
+
+define({
+  name: "purge", usage: "/purge", group: "channel",
+  description: "Delete every message in this channel's transcript.",
+  detail: "This is the destructive one: it removes the stored messages, not just what is on screen. Engine memory is a separate thing again — /forget drops that.",
   handler: (ctx) => {
     const removed = ctx.store.clearMessages(ctx.session.id);
     ctx.session.messageCount = 0;
-    ok(ctx, `Cleared ${removed} messages.`);
+    ok(ctx, `Purged ${removed} messages from ${channelLabel(ctx, ctx.session)}.`);
     ctx.out(`  ${ctx.ui.c.muted("Engine memory for this conversation is unchanged — /forget does that.")}`);
   },
 });
@@ -646,7 +657,7 @@ define({
   handler: (ctx) => {
     ctx.engine.memory.store.deleteConversation(ctx.session.id);
     ok(ctx, "Channel memory deleted (facts, summaries, participants, standing instructions).");
-    ctx.out(`  ${ctx.ui.c.muted("The transcript itself is untouched — /clear does that.")}`);
+    ctx.out(`  ${ctx.ui.c.muted("The transcript itself is untouched — /purge does that.")}`);
   },
 });
 

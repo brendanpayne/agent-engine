@@ -358,6 +358,7 @@ async function main() {
     saveSettings,
     applyAppearance,
     resolveAttachment,
+    clearScreen: () => ui.clearScreen(process.stdout),
     startedAt: Date.now(),
     exit: false,
     setSession(next) { ctx.session = next; },

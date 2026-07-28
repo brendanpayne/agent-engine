@@ -302,12 +302,18 @@ memory scope along with the transcript. Channels are addressable by the
 | `/history [n]` | Replay the last n messages, numbered |
 | `/search <text> [--all]` | Search this channel, or every channel |
 | `/export [file]` | Write the transcript to Markdown, or `.json` for raw records |
-| `/clear` | Erase the transcript — engine memory untouched |
+| `/clear` | Clear the screen, like `clear(1)` — nothing is deleted |
+| `/purge` | Erase the transcript — engine memory untouched |
 | `/forget` | Drop the engine's facts and summaries for this conversation |
 
-`/clear` and `/forget` are separate on purpose: erasing what you can read and
-erasing what the model recalls are different intentions, and merging them makes
-one of the two happen by accident.
+Those last three are separate on purpose, because they erase three different
+things: what is on your screen, what you can scroll back to, and what the model
+recalls. Merging any of them makes one happen by accident.
+
+`/clear` (or `/cls`) wipes the screen *and* the scrollback, then reprints the
+channel header. Ctrl-L is the lighter version — it repaints the screen and
+leaves the scrollback, exactly the split a shell makes between the two. Neither
+touches stored data.
 
 ### Messages
 
