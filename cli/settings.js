@@ -71,6 +71,53 @@ const DEFINITIONS = {
     type: "bool", default: true,
     describe: "Print which tools ran during a turn",
   },
+
+  // Presentation. None of these reach the engine; they decide how the client
+  // draws what comes back.
+  theme: {
+    type: "enum", default: "discord", values: ["discord", "midnight", "mono"],
+    describe: "Colour theme (mono = no colour codes)",
+  },
+  color: {
+    type: "bool", default: true,
+    describe: "Use colour (NO_COLOR and non-TTY output always win)",
+  },
+  markdown: {
+    type: "bool", default: true,
+    describe: "Render markdown — bold, code blocks, lists, spoilers",
+  },
+  compact: {
+    type: "bool", default: false,
+    describe: "One line per message instead of author blocks",
+  },
+  typingIndicator: {
+    type: "bool", default: true,
+    describe: "Show \"typing…\" while the model works",
+  },
+  showLatency: {
+    type: "bool", default: true,
+    describe: "Print how long each reply took",
+  },
+  statusBar: {
+    type: "bool", default: true,
+    describe: "Show the identity/channel/model strip above the prompt",
+  },
+  botName: {
+    type: "string", default: "Assistant",
+    describe: "Display name for the bot",
+  },
+  urlContext: {
+    type: "bool", default: true,
+    describe: "Fetch links in your message and pass them as perception",
+  },
+  timestamps: {
+    type: "bool", default: true,
+    describe: "Show a time next to each message",
+  },
+  autocomplete: {
+    type: "bool", default: true,
+    describe: "Show the slash-command picker as you type",
+  },
 };
 
 function coerce(key, raw) {
@@ -92,7 +139,23 @@ function coerce(key, raw) {
     }
     return parsed;
   }
+  if (def.type === "enum") {
+    const value = text.toLowerCase();
+    if (!def.values.includes(value)) {
+      throw new Error(`"${key}" expects one of ${def.values.join(", ")}, got "${text}".`);
+    }
+    return value;
+  }
   return text;
+}
+
+// Candidate values for a setting, for tab completion and error messages.
+function valuesFor(key) {
+  const def = DEFINITIONS[key];
+  if (!def) return [];
+  if (def.type === "bool") return ["on", "off"];
+  if (def.type === "enum") return def.values;
+  return ["default"];
 }
 
 function defaults() {
@@ -145,7 +208,17 @@ function format(value) {
   return String(value);
 }
 
+// Settings grouped for display, so /config reads as sections rather than a wall
+// of keys. Anything not listed here still shows up, under "other".
+const GROUPS = {
+  identity: ["userName", "userId", "scopeId", "botName"],
+  model: ["model", "persona", "lowBudget", "toolDepth", "historyDepth"],
+  behaviour: ["stream", "tools", "memory", "urlContext"],
+  appearance: ["theme", "color", "markdown", "compact", "timestamps", "statusBar", "autocomplete"],
+  telemetry: ["showUsage", "showTools", "showLatency", "typingIndicator"],
+};
+
 module.exports = {
-  DEFINITIONS, SETTINGS_PATH,
-  defaults, load, save, applyToEnv, coerce, format,
+  DEFINITIONS, SETTINGS_PATH, GROUPS,
+  defaults, load, save, applyToEnv, coerce, format, valuesFor,
 };

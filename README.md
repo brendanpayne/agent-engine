@@ -242,41 +242,65 @@ the engine has no idea what a terminal is.
 
 ## The chat CLI
 
-A real chatbot on top of the engine — saved transcripts, multiple sessions, and
-configuration you can change mid-conversation:
+A real chat client on top of the engine — saved transcripts, channels, members,
+rendered markdown, and configuration you can change mid-conversation:
 
 ```bash
 npm run chat
 ```
 
 ```
-agent-engine chat — /help for commands, /exit to quit.
-session s_mrwk0a03l52  deploy questions (14 messages)
+  ┌───────────────────────────────────────────┐
+  │   ▄▀█ █▀▀ █▀▀ █▄░█ ▀█▀   █▀▀ █▄░█ █▀▀ █▄░█ │
+  │   █▀█ █▄█ ██▄ █░▀█ ░█░   ██▄ █░▀█ █▄█ █░▀█ │
+  └───────────────────────────────────────────┘
+  v1.0.0  ·  deepseek-chat
+  /help for commands · /channels to switch · /exit to quit
 
-deploy questions > what did we decide about the migration?
+#deploy-questions  14 messages · 2 members
+  Cutover plan and open blockers
+────────────────────────────────────────────────────────────────────────────────
+
+  as Brendan  │  in #deploy-questions  │  via deepseek-chat
+#deploy-questions Brendan › what did we decide about the migration?
+
+▎ Assistant  BOT  6:44 PM
+▎ You settled on the two-phase cutover:
+▎ • dual-write for a week
+▎ • flip reads once the lag graph is flat
+    ⚙ recall_context · 1,204 tokens · $0.00019 · 1.4s
 ```
 
 Anything not starting with `/` goes to the model. Everything terminal-specific
 lives in [`cli/`](cli/) — the engine still just receives
 `{ userId, conversationId, text }`.
 
-### Sessions and history
+The vocabulary is the one this engine grew up hosting: a session is a **channel**,
+speakers are **members**, and messages carry **replies**, **attachments**,
+**reactions** and **pins**. All of that is client-side. The engine's input shape
+is unchanged; the client simply fills in more of the optional fields it always
+accepted (`participants`, `attachments`, `perception`, `replyContext`).
+
+### Channels and history
 
 Transcripts are stored verbatim in `db/cli_chat.sqlite`. That is deliberately
 *not* the engine's memory: facts, summaries, and the archive are derived and
 pruned on a retention policy, so neither one is a transcript you can scroll.
 
-A session id doubles as the engine's `conversationId`, so `/switch` moves the
-memory scope along with the transcript.
+A channel id doubles as the engine's `conversationId`, so `/join` moves the
+memory scope along with the transcript. Channels are addressable by the
+`#slug` of their title, by id, or by a unique id prefix.
 
 | Command | Effect |
 |---|---|
-| `/new [title]` | Start a session — new transcript *and* new memory scope |
-| `/sessions` | List sessions, most recent first |
-| `/switch <id>` | Switch by id, unique id prefix, or exact title |
-| `/rename <title>` | Retitle (untitled sessions auto-title from the first message) |
-| `/delete <id>` | Delete a session and its transcript |
-| `/history [n]` | Print the last n turns |
+| `/new [title]` | Create a channel — new transcript *and* new memory scope |
+| `/channels` | List channels, most recently active first |
+| `/join <#channel\|id>` | Switch by `#name`, id, or unique id prefix |
+| `/rename <title>` | Retitle (untitled channels auto-title from the first message) |
+| `/topic [text]` | Set the channel topic shown in the header and exports |
+| `/delete <#channel>` | Delete a channel and its transcript |
+| `/history [n]` | Replay the last n messages, numbered |
+| `/search <text> [--all]` | Search this channel, or every channel |
 | `/export [file]` | Write the transcript to Markdown, or `.json` for raw records |
 | `/clear` | Erase the transcript — engine memory untouched |
 | `/forget` | Drop the engine's facts and summaries for this conversation |
@@ -284,6 +308,44 @@ memory scope along with the transcript.
 `/clear` and `/forget` are separate on purpose: erasing what you can read and
 erasing what the model recalls are different intentions, and merging them makes
 one of the two happen by accident.
+
+### Messages
+
+`/history` numbers every message, and the message commands take that number —
+or a negative offset, where `-1` is the most recent.
+
+| Command | Effect |
+|---|---|
+| `/reply <n> <text>` | Reply to a message, quoting it to the model as `replyContext` |
+| `/retry` | Drop the last exchange and ask again |
+| `/edit <n> <text>` | Rewrite a message in the transcript (marked as edited) |
+| `/delmsg <n>` | Delete a message; later ones renumber |
+| `/react <n> <emoji>` | Toggle a reaction, stored with the transcript |
+| `/pin <n>` · `/pins` | Pin a message, list the pinned ones |
+| `/attach <path\|url>` | Queue a file or link for your next message |
+| `/me <action>` | Send an action message |
+
+`/attach` does what a chat host does with an upload: it keeps the attachment
+record (`url`, `contentType`, `name`) for the engine to pass through, *and*
+reads what a text model can actually use into `perception`. Links pasted
+straight into a message get the same treatment when `urlContext` is on.
+
+`/retry` deletes both halves of the last exchange before re-asking, so the
+transcript never ends up holding two answers to one question.
+
+### Members
+
+Memory is anchored on `userId`, so who you are speaking as decides which facts
+the engine reads and writes. `/user <name>` switches identity and derives an id
+from the name; everyone who has spoken in a channel is passed to the engine as
+`participants`, which is what anchors per-participant facts.
+
+| Command | Effect |
+|---|---|
+| `/members` | Everyone who has spoken here, with counts and last-seen |
+| `/user [name]` | Show or change who you are speaking as |
+| `/whois [name]` | What the engine knows about a member |
+| `/status` | Bot presence: model, tools, uptime, spend |
 
 ### Configuration
 
@@ -307,17 +369,79 @@ to `db/cli-settings.json`. `default` as a value restores the default.
 | `persona` | engine default | System persona override |
 | `historyDepth` | `20` | Past messages replayed into each turn |
 | `userId` / `userName` / `scopeId` | `cli-user` / `You` / `cli` | Identity sent with each turn |
-| `showUsage` / `showTools` | `on` | Per-reply token/cost and tool lines |
+| `botName` | `Assistant` | Display name for the bot |
+| `urlContext` | `on` | Fetch links in your message and pass them as perception |
+| `showUsage` / `showTools` / `showLatency` | `on` | Per-reply token/cost, tool, and timing footer |
 
 Settings marked **(restart)** map to engine configuration that the agent loop
 reads once at module load; the CLI applies them to the environment at startup
 and says so when you set one, rather than pretending a live change took.
 
+### Appearance
+
+| Setting | Default | Effect |
+|---|---|---|
+| `theme` | `discord` | `discord`, `midnight`, or `mono` |
+| `color` | `on` | `NO_COLOR` and a non-TTY stdout always win |
+| `markdown` | `on` | Render bold, code blocks, lists, quotes, spoilers |
+| `compact` | `off` | One line per message instead of author blocks |
+| `timestamps` / `statusBar` | `on` | Per-message time; the identity/channel/model strip |
+| `typingIndicator` | `on` | "typing…" while the model works |
+| `autocomplete` | `on` | The slash-command picker |
+
+Streaming and markdown rendering coexist rather than trade off: an incomplete
+line is drawn as plain text and redrawn in place as tokens land, then replaced
+with the rendered version the moment its newline arrives. A `**` is not bold
+until its partner shows up, so committing early would mean rendering it wrong.
+
+Redirecting output to a file produces a clean, escape-free transcript.
+
 ### Inspection
 
 `/tools` lists what the model can call this turn, `/memory` shows the facts,
-summaries, and topic the engine currently holds for this conversation and user,
-and `/stats` reports messages, tokens, and spend for the session.
+summaries, standing instructions, and topic the engine currently holds for this
+channel and user, and `/stats` reports messages, tokens, and spend. Structured
+output is drawn as an embed card so command output never reads as model output.
+
+Ctrl-C clears the line you are typing; twice, or on an empty line, quits.
+
+### The slash-command picker
+
+Typing `/` opens a list under the prompt that narrows as you type:
+
+```
+#deploy-questions Brendan › /pin
+  ▸ /pin <n>    Pin message #n in this channel.
+    /pins       List this channel's pinned messages.
+    /unpin <n>  Remove the pin from message #n.
+    3 matches · Tab cycles · Esc dismisses
+```
+
+Matching is prefix-first, then substring — `/pin` finds `unpin` too, but never
+above the exact prefix match. It completes arguments as well as command names,
+and offers what the argument actually is rather than a shape to fill in:
+
+| Typing | Offers |
+|---|---|
+| `/set ` | Setting keys, with what each one does |
+| `/set theme ` | `discord`, `midnight`, `mono` — the current one marked |
+| `/join ` | Channels, with message counts and last activity |
+| `/react `, `/pin `, `/reply ` | Recent messages with their text, not bare numbers |
+| `/user `, `/whois ` | Members of this channel |
+
+**Tab inserts as it cycles**, so whatever is highlighted is also what is on the
+line — Enter then sends the highlighted candidate. Shift-Tab goes back, Escape
+dismisses (typing again brings it back), and a single match completes the word
+and moves on to the next argument.
+
+Enter is deliberately *not* intercepted. readline emits its `line` event from
+inside its own keypress handler, before any other listener runs, so a picker
+cannot veto a submission — cycling has to leave the line already correct rather
+than relying on Enter to accept. The picker also steps aside when it cannot
+draw honestly: no TTY, a wrapped input line, or a cursor that is not at the end
+of the line. And because it runs inside a keypress listener, where an exception
+would be unhandled and take the REPL down, any failure just means "no
+suggestions" — never a crash while you are typing.
 
 ---
 

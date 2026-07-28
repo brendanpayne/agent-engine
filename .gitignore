@@ -11,6 +11,9 @@ db/
 logs/
 coverage/
 
+# Media the chat CLI saves out of tool results
+attachments/
+
 # Scratch databases created by the test suite
 test/tmp/
 test/tmp-integration/
